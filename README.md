@@ -4,7 +4,7 @@ A Jupyter Book documenting my learning journey through causal inference, featuri
 
 ## 📚 View the Book
 
-Visit the live website: **https://anniewang.github.io/causal_inference/** (once deployed)
+Visit the live website: **https://aw94nb-ship-it.github.io/causal_inference/** (once deployed)
 
 ## 🚀 Quick Start
 
@@ -16,7 +16,7 @@ Visit the live website: **https://anniewang.github.io/causal_inference/** (once 
 
 1. Clone this repository:
 ```bash
-git clone https://github.com/anniewang/causal_inference.git
+git clone https://github.com/aw94nb-ship-it/causal_inference.git
 cd causal_inference
 ```
 

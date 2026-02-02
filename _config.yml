@@ -19,7 +19,7 @@ bibtex_bibfiles:
 
 # Information about where the book exists on the web
 repository:
-  url: https://github.com/anniewang/causal_inference  # Online location of your book
+  url: https://github.com/aw94nb-ship-it/causal_inference  # Online location of your book
   path_to_book: ""  # Optional path to your book, relative to the repository root
   branch: main  # Which branch of the repository should be used when creating links (optional)
 
@@ -29,7 +29,7 @@ html:
   use_repository_button: true
   use_edit_page_button: true
   home_page_in_navbar: true
-  baseurl: https://anniewang.github.io/causal_inference/
+  baseurl: https://aw94nb-ship-it.github.io/causal_inference/
 
 # Launch buttons
 launch_buttons:
@@ -55,7 +55,7 @@ parse:
 sphinx:
   config:
     html_theme_options:
-      repository_url: https://github.com/anniewang/causal_inference
+      repository_url: https://github.com/aw94nb-ship-it/causal_inference
       use_repository_button: true
       use_issues_button: true
       use_edit_page_button: true
