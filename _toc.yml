@@ -4,17 +4,15 @@ root: intro
 chapters:
   - file: chapters/fundamentals
     sections:
-      - file: chapters/fundamentals/causality-basics
-      - file: chapters/fundamentals/potential-outcomes
-  - file: chapters/methods
-    sections:
-      - file: chapters/methods/randomized-experiments
-      - file: chapters/methods/matching
-      - file: chapters/methods/regression-discontinuity
-      - file: chapters/methods/instrumental-variables
-      - file: chapters/methods/difference-in-differences
-  - file: chapters/advanced
-    sections:
-      - file: chapters/advanced/sensitivity-analysis
-      - file: chapters/advanced/mediation-analysis
+      - file: chapters/fundamentals/chapter1
+      - file: chapters/fundamentals/chapter2
+      - file: chapters/fundamentals/chapter3
+      - file: chapters/fundamentals/chapter4
+      - file: chapters/fundamentals/chapter5
+      - file: chapters/fundamentals/chapter6
+      - file: chapters/fundamentals/chapter7
+      - file: chapters/fundamentals/chapter8
+      - file: chapters/fundamentals/chapter9
+      - file: chapters/fundamentals/chapter10
+      - file: chapters/fundamentals/chapter11
   - file: chapters/resources
