@@ -29,6 +29,40 @@ That approach confounds pre-existing differences between the groups with the tre
 
 ---
 
+## Data Structure
+
+Every DiD dataset has the same core structure: one row per unit × time period. Using the NJ/PA minimum wage example with actual numbers:
+
+| unit_id | period | treated | post | D (treated×post) | Y (FTE) |
+|---------|--------|---------|------|------------------|---------|
+| NJ_01 | Feb-1992 | 1 | 0 | 0 | 20.1 |
+| NJ_01 | Nov-1992 | 1 | 1 | **1** | 21.5 |
+| NJ_02 | Feb-1992 | 1 | 0 | 0 | 19.8 |
+| NJ_02 | Nov-1992 | 1 | 1 | **1** | 22.0 |
+| PA_01 | Feb-1992 | 0 | 0 | 0 | 23.1 |
+| PA_01 | Nov-1992 | 0 | 1 | 0 | 21.0 |
+| PA_02 | Feb-1992 | 0 | 0 | 0 | 23.6 |
+| PA_02 | Nov-1992 | 0 | 1 | 0 | 21.3 |
+
+Column definitions:
+- **treated** (time-invariant): 1 if the unit is in the treatment group (NJ), 0 if control (PA). Same value in both rows for each unit.
+- **post** (unit-invariant): 1 if this row is the post-treatment period, 0 if pre. Same for all units in a given period.
+- **D = treated × post**: the treatment indicator. **Only = 1 for treated units in the post period.** This is the column whose OLS coefficient gives the DiD estimate.
+- **Y**: the observed outcome (fast food FTE employment).
+
+The 2×2 structure maps directly to the estimator:
+
+| | pre (post=0) | post (post=1) | Change |
+|---|---|---|---|
+| **treated=1 (NJ)** | 20.0 | 21.8 | +1.8 |
+| **treated=0 (PA)** | 23.3 | 21.2 | −2.1 |
+
+DiD = 1.8 − (−2.1) = **+3.9 FTE**
+
+The regression runs on every row in the full table. You do not collapse to group means first. OLS on the full panel with `Y ~ treated + post + D` recovers +3.9 exactly.
+
+---
+
 ## The Classic 2×2 DiD
 
 The simplest DiD setup has two groups and two time periods:
@@ -792,6 +826,26 @@ ax2.legend()
 plt.tight_layout()
 plt.show()
 ```
+
+---
+
+## Methods in Practice
+
+Step-by-step checklist for running a DiD analysis:
+
+1. **Collect panel data**: unit × time table with outcome Y, unit ID, and time period.
+2. **Define the indicators**: `treated` (1 = treatment group, 0 = control; time-invariant), `post` (1 = post-treatment period, 0 = pre; unit-invariant), `D = treated × post` (actual treatment indicator — the only column that = 1 for treated units in post period).
+3. **Visualize trends**: plot average Y over time, separate lines for treated and control. Lines should be roughly parallel before the treatment date.
+4. **Pre-trends test**: in pre-treatment periods only, regress Y on unit FE, time FE, and (period × treated) interaction dummies. All interaction coefficients should be near zero and insignificant. A significant pre-trend = DiD is invalid.
+5. **Fit TWFE model**: `Y ~ D + C(unit) + C(period)` on the full panel. The coefficient on D is your DiD estimate.
+6. **Cluster standard errors** at the unit level (or at the level of treatment assignment). Observations within the same unit are correlated over time — ignoring this makes SEs too small.
+7. **Event study** (recommended): estimate a separate coefficient for each period relative to treatment. Pre-period coefficients ≈ 0 supports parallel trends; post-period coefficients reveal effect dynamics (immediate vs. building vs. fading).
+8. **Validity checks**: placebo outcome test (D should have no effect on an unrelated outcome), time placebo (fake treatment date should show no effect in pre-period data), spillover check (control group should not be contaminated by treatment).
+
+**What good output looks like:**
+- `D coef = 3.9, SE = 0.8, 95% CI [2.4, 5.4], p < 0.001`
+- Pre-trends: all period × treated interactions insignificant → parallel trends holds
+- Event study: flat pre-period, clean jump at treatment, stable post-period → credible causal estimate
 
 ---
 

@@ -4,6 +4,20 @@ When you have only a single treated unit — one country, one state, one company
 
 ---
 
+## Assumptions
+
+Synthetic control works well as long as its assumptions hold. Before using SC, assess whether you can explain and defend each assumption to stakeholders — even if the assumptions are technically true, a lack of confidence in them undermines the credibility of your conclusions.
+
+1. **Predictability**: X(t) (the donor/control time series) can be used to build a predictive model for Y(t) using pre-treatment data. The donor pool must actually track the treated unit's trajectory.
+
+2. **No spillovers / no interference**: The event at time T has no effect whatsoever on the controls X(t). If treatment spills over into the donor pool (e.g., a competitor reacts to your product launch), the synthetic control is contaminated.
+
+3. **Consistent relationship / no confounding events**: A stable relationship exists between Y(t) and X(t) — no other events near time T (besides the main event) distort the Y/X relationship. If another shock hits at the same time as treatment, you can't separate the two effects.
+
+**For your Apple BD story**: be ready to explain why your donor pool satisfies assumption 2 (why the partners/markets you used as controls weren't affected by the same BD deals) and assumption 3 (no other concurrent events distorting the comparison).
+
+---
+
 ## When DiD Fails: The Single Treated Unit Problem
 
 DiD is powerful when you have many treated units, because averaging across them makes the parallel trends assumption more credible and gives you statistical power. But many important policy questions involve a single treated unit:
@@ -27,6 +41,38 @@ Synthetic control addresses all three problems:
 
 ---
 
+## Selecting Training and Predicting Time Periods
+
+Both periods must be chosen based on domain knowledge, but there's a tradeoff involved in selecting P_b^start (how far back the pre-treatment period begins):
+
+| P_b^start choice | Effect |
+|---|---|
+| Far from T | More training data → lower variance, but Y/X relationship may weaken over time → more bias |
+| Close to T | Relationship is stable and consistent → less bias, but small training set → high variance |
+
+**Practical approach**: try different values of P_b^start, run cross-validation for each to estimate predictive capability, and choose the one with the lowest predictive error. This is valid because you're tuning a predictive model on pre-treatment data — not doing causal identification.
+
+**Selecting P_a^start (post-treatment evaluation start)**: usually set immediately after T, but if the treatment effect is delayed (e.g., a campaign requires physical delivery before impact is measurable), set P_a^start farther from T to allow the effect to materialize. Choosing P_a^start too early when effects are delayed will underestimate the treatment effect. This should be driven by domain knowledge of the mechanism.
+
+**Novelty vs. sustained effects — choosing P_a^end**: decide whether you want short-term, medium-term, or long-term effects. The farther P_a^start is from T, the more likely conditions surrounding Y(t) and X(t) will change, causing the model to lose accuracy.
+
+**Critical limitation — post-treatment period is blind**: during pre-treatment training, you can use cross-validation to verify the model's predictive accuracy. In the post-treatment period, you're predicting a counterfactual that never happened — there's no ground truth to check against. You cannot validate the model's accuracy post-T. This means the validity of the post-treatment predictions rests entirely on domain expertise and the assumption that the Y/X relationship remains stable.
+
+**Summary — consequences of moving each endpoint farther from T (Table 11.3):**
+
+| Endpoint | Direction | Effect of moving farther from T |
+|---|---|---|
+| P_b^start | ← (further back) | More training data → lower variance, but context may change → less accuracy |
+| P_b^end | ← (closer to T) | Less training data → higher variance, but more stable context → more accuracy. Moving P_b^end away from T risks capturing event anticipation effects |
+| P_a^start | → (further from T) | Captures delayed effects, but less post-treatment data and higher risk of context change |
+| P_a^end | → (further from T) | More data to evaluate long-term impact, but higher risk of Y/X relationship drifting |
+
+**Key insight**: all four endpoints trade off sample size against context stability. The closer to T, the more stable the Y/X relationship — but the less data you have.
+
+**Rule of thumb for pre-treatment length**: typically ≥ 10 periods to establish a reliable match (see DiD vs SC comparison table).
+
+---
+
 ## The Synthetic Control Idea
 
 The idea is disarmingly simple: instead of picking one control unit, build a **weighted average of all available control units** that best replicates the pre-treatment history of the treated unit.
@@ -39,6 +85,50 @@ After treatment begins, synthetic California continues to evolve as a weighted a
 - Pre-treatment fit is close (low RMSPE)
 - Weights are non-negative and sum to 1 (so the synthetic unit is an extrapolation-free convex combination)
 - The donor pool consists of units not affected by the treatment
+
+---
+
+## Data Structure
+
+Synthetic control data has the same unit × time structure as DiD, but with only **one treated unit**. Using the California Prop 99 smoking example:
+
+**Long format** (for storage and exploration): one row per state × year.
+
+| state | year | treated | post | Y (packs/capita/year) |
+|-------|------|---------|------|-----------------------|
+| California | 1985 | 1 | 0 | 116.1 |
+| California | 1988 | 1 | 0 | 112.3 |
+| California | 1989 | 1 | **1** | 103.5 |
+| California | 2000 | 1 | 1 | 89.0 |
+| Colorado | 1985 | 0 | 0 | 107.0 |
+| Colorado | 1988 | 0 | 0 | 104.5 |
+| Colorado | 1989 | 0 | 1 | 103.2 |
+| Utah | 1985 | 0 | 0 | 78.2 |
+| ... | ... | 0 | ... | ... |
+
+**Wide format** (needed for weight optimization): one column per state, rows are time periods. The optimizer sees all donor states side-by-side.
+
+| year | post | California | Colorado | Utah | Nevada | Montana |
+|------|------|-----------|----------|------|--------|---------|
+| 1970 | 0 | 127.1 | 120.3 | 95.4 | 130.2 | 88.1 |
+| 1975 | 0 | 122.8 | 118.1 | 91.0 | 127.5 | 85.3 |
+| 1988 | 0 | 116.0 | 115.2 | 89.3 | 125.1 | 82.4 |
+| **1989** | **1** | 111.2 | 114.0 | 88.5 | 124.3 | 81.8 |
+| 2000 | 1 | 90.1 | 112.0 | 86.0 | 122.0 | 80.1 |
+
+The optimization uses **only the pre-treatment rows (post=0)** and **only the donor columns**. It finds weights w such that the weighted donor average matches the California column as closely as possible row by row:
+
+```
+w_CO × 120.3 + w_UT × 95.4 + w_NV × 130.2 + w_MT × 88.1 ≈ 127.1  (1970)
+w_CO × 118.1 + w_UT × 91.0 + w_NV × 127.5 + w_MT × 85.3 ≈ 122.8  (1975)
+w_CO × 115.2 + w_UT × 89.3 + w_NV × 125.1 + w_MT × 82.4 ≈ 116.0  (1988)
+```
+
+The weights are **frozen after training**. In post-treatment rows (1989+), apply the same weights to the donor columns to project the counterfactual. Treatment effect at each year:
+
+`gap_t = Y_California_t − (w_CO × Y_Colorado_t + w_UT × Y_Utah_t + ...)`
+
+At 2000: `89.0 − (w_CO × 112.0 + ...) ≈ 89.0 − 115.0 = −26 packs/capita`
 
 ---
 
@@ -460,6 +550,49 @@ The `SparseSC` package in Python implements the ASC and related methods.
 
 ---
 
+## Improving Accuracy: Features, Regularization, and Practical Rules
+
+### Adding Predictor Features (the V Matrix)
+
+The original Abadie et al. (2010) formulation doesn't just match on outcome trajectory — it can also match on pre-treatment predictor variables (GDP, population, trade share, demographic characteristics) using a weighted feature matrix:
+
+$$\min_W \sum_k v_k \left(X_{1k} - \sum_j w_j X_{jk}\right)^2$$
+
+where $X_{1k}$ are pre-treatment characteristics of the treated unit, $X_{jk}$ are the same for each donor, and $v_k$ are feature weights (the V matrix). The outer optimization finds the V that minimizes pre-period prediction error; the inner optimization finds the W given V. In practice, matching on lagged outcomes alone is often sufficient — adding covariates helps mainly when outcome-only matching gives poor pre-period fit.
+
+### Regularization on the Weights
+
+The standard constraints (w_j ≥ 0 and Σw_j = 1) **are already a form of regularization.** They restrict the synthetic unit to a convex combination, preventing overfitting by design — no negative weights means no cancellation, and the synthetic unit stays within the space of observed donor trajectories.
+
+When the donor pool is large relative to the number of pre-treatment periods, additional regularization options exist:
+
+| Method | What it does | When to use |
+|---|---|---|
+| **Standard SC constraints** | Convex combination; prevents extrapolation | Default; always apply |
+| **SparseSC (L1-style penalty)** | Pushes most weights to zero; produces sparse, interpretable weights | Large donor pool; want interpretability |
+| **Augmented SC (ridge correction)** | Adds ridge regression bias-correction term on top of SC weights | Treated unit is outside donor convex hull; high pre-period RMSPE |
+| **Matrix completion (Athey 2021)** | Frames SC as matrix completion with nuclear norm regularization | Missing data; panel with many units and times |
+
+### Practical Decision Rule
+
+**Start simple. Escalate only when pre-period fit is poor.**
+
+1. **Run standard SC with outcome-only matching.** Check pre-period RMSPE relative to outcome scale.
+   - RMSPE < 5% of mean outcome → fit is good, stop here
+   - RMSPE ≥ 5% → proceed to step 2
+
+2. **Expand the donor pool.** More control units give the optimizer more flexibility to match the treated unit's trajectory.
+
+3. **Extend the pre-treatment period.** More training periods reduce variance in the weight estimates.
+
+4. **Add predictor covariates (V matrix).** Include pre-treatment characteristics that explain the treated unit's trajectory and are available for all donors.
+
+5. **Use Augmented SC.** If none of the above achieves low RMSPE, use ASC to add a ridge bias-correction term. This handles the case where the treated unit lies outside the donor convex hull.
+
+**Key insight**: if pre-period RMSPE is already low with outcome-only matching, adding features or regularization adds complexity without meaningful benefit — and makes the method harder to explain to stakeholders. Transparency and simplicity are advantages of synthetic control; don't sacrifice them unnecessarily.
+
+---
+
 ## Synthetic Control vs. DiD
 
 | Dimension | DiD | Synthetic Control |
@@ -659,6 +792,28 @@ p_val = np.mean([r >= rmspe_ratio_treated for r in all_ratios])
 print(f"\nPermutation p-value: {p_val:.3f}")
 print(f"  (Fraction of units with post/pre RMSPE ratio >= treated unit's ratio)")
 ```
+
+---
+
+## Methods in Practice
+
+Step-by-step checklist for running synthetic control:
+
+1. **Identify treated unit and donor pool**: one treated unit; donors = units unaffected by treatment spillovers, with similar pre-treatment trajectories. Exclude donors with known interference.
+2. **Choose time periods**: set P_b^start (training start), T (treatment date), P_a^end (evaluation end). Pre-treatment period should be ≥ 10 periods for a reliable match.
+3. **Reshape to wide format**: rows = time periods, columns = units. The California column is the target; all other columns are donors.
+4. **Optimize weights**: minimize pre-period MSE between the treated unit's column and a weighted average of donor columns, subject to w_j ≥ 0 and Σw_j = 1 (convex combination constraint). Use `scipy.optimize.minimize` with SLSQP.
+5. **Check pre-period fit (RMSPE)**: compute `sqrt(mean((treated − synthetic)²))` over pre-treatment periods. If RMSPE is large relative to the outcome scale (>5%), the synthetic control is a poor match — expand donor pool, extend pre-period, or use Augmented SC.
+6. **Project counterfactual**: apply frozen weights to donor columns in post-treatment rows. Do not refit.
+7. **Compute gap**: `gap_t = treated_t − synthetic_t` at each post-period. Average gap = estimated treatment effect.
+8. **Permutation inference**: apply steps 4–7 to each donor unit as a placebo (treating each donor as if it were the treated unit). Compare the treated unit's post/pre RMSPE ratio to the distribution of placebo ratios. Permutation p-value = fraction of units with ratio ≥ treated unit's ratio.
+9. **Spaghetti plot**: overlay all placebo gap paths (gray lines) with the treated unit's gap path (colored line). Treated unit should stand clearly outside the placebo envelope post-treatment.
+
+**What good output looks like:**
+- Weights: CO=40%, UT=30%, NV=20%, MT=10% — sparse and interpretable
+- Pre-period RMSPE: 1.6 packs (1.3% of mean outcome scale) → good fit
+- Average treatment effect at 2000: −26 packs/capita
+- Permutation p-value: p = 0.05 → treated unit's gap is unusual relative to all placebo paths
 
 ---
 

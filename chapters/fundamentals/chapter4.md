@@ -591,6 +591,8 @@ Matching requires that for every treated unit, there exist control units with si
 
 With 1-NN matching without replacement, the estimator can be noisy — especially when the treated group is large relative to the control group. Using more neighbors ($k > 1$) reduces variance but adds bias. Using matching with replacement introduces correlation between matched pairs, requiring variance estimators that account for the reuse of controls.
 
+**Choosing k via cross-validation**: when matching on the propensity score, k can be treated as a supervised learning hyperparameter. Frame it as: predict outcome $O$ from propensity score $S$ separately for treated and control datasets, and use cross-validation to select the k that minimizes prediction error. This is valid here because you're tuning a predictive model (how many neighbors best predicts the outcome), not making a causal identification choice — so cross-validation's logic applies. This is distinct from variable selection for confounders (which must come from the DAG, not cross-validation).
+
 ### 4. Doesn't Scale Well to Many Covariates
 
 Matching directly on high-dimensional covariate vectors suffers from the curse of dimensionality — distances become uninformative in high-dimensional spaces. The standard solution is to match on the **propensity score** (Chapter 5), which collapses all covariates into a single number.

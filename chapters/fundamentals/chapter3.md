@@ -479,6 +479,230 @@ print(f"Adjusted effect:      {adjusted:.3f}")  # ~0.05, the true effect
 
 ---
 
+## Meta-Learners: Using ML to Evaluate the Adjustment Formula
+
+The adjustment formula requires computing $E[Y \mid T=t, Z_1, \ldots, Z_p]$ across every combination of confounders. With a small number of discrete confounders you can stratify directly — but in practice you have many, often continuous confounders. **Meta-learners** solve this by using an ML model to estimate the conditional expectation, then plugging that model into the adjustment formula.
+
+### Empirical vs. Data-Generating Distribution
+
+The adjustment formula is defined over the **data-generating distribution** $P$ — the true, infinite-population joint distribution of all variables. In practice we only have a finite dataset, which follows the **empirical distribution** $P_E$: each observed row $\{x^i, y^i, z_1^i, \ldots, z_p^i\}$ has probability $1/n$.
+
+When you apply the adjustment formula to your dataset under $P_E$, the confounder weights $P_E(Z_1 = z_1, \ldots, Z_p = z_p)$ equal $1/n$ for each observed row. The formula simplifies to:
+
+$$P_E(Y = y \mid do(X = x)) = \frac{1}{n} \sum_{i} P_E\!\left(Y = y \mid X = x,\, z_1^i, \ldots, z_p^i\right)$$
+
+For continuous $Y$, this becomes:
+
+$$E[Y \mid do(X = x)] = \frac{1}{n} \sum_{i} E\!\left[Y \mid X = x,\, z_1^i, \ldots, z_p^i\right]$$
+
+**Key insight**: as $n \to \infty$, $P_E$ converges to $P$ — so the empirical adjustment formula converges to the true interventional expectation. The ML model's job is to estimate the inner conditional expectation $E[Y \mid X = x, z^i]$ for each row.
+
+---
+
+### S-Learner ("Single")
+
+The S-learner trains a **single** ML model $f(x, z_1, \ldots, z_p)$ to predict $Y$ from treatment $X$ and all confounders $Z$. The ATE is estimated by evaluating this model at $X=1$ and $X=0$ for every observation and averaging the difference:
+
+$$\widehat{\text{ATE}} = \frac{1}{n} \sum_i \left[ f(1, z_1^i, \ldots, z_p^i) - f(0, z_1^i, \ldots, z_p^i) \right]$$
+
+**The S-learner's failure mode**: when training a model to predict $Y$ from $X$ and $Z$, the training process exploits all correlations — including the correlation between $Z$ and $Y$. Tree-based models (decision trees, random forests, gradient boosting) may route the entire prediction through $Z$ and never split on $X$. This makes $f$ insensitive to $X$: changing $X$ from 0 to 1 produces no change in $f$, so the estimated ATE is exactly 0 — not because there is no effect, but as an artifact of the model-fitting process.
+
+**Variable selection warning**: unlike predictive ML, you cannot use cross-validation to select which confounders $Z$ to include. Cross-validation optimizes prediction accuracy, not causal identification. Dropping a confounder from the model can introduce Simpson's paradox-style bias that cross-validation will never detect. **Confounders are selected based on the DAG — period.**
+
+---
+
+### T-Learner ("Two")
+
+The T-learner fixes the S-learner's X-dropping problem by training **two separate models**: one on the treated units and one on the control units.
+
+1. Fit $f_1$ on the treated subsample $\{(z^i, y^i) : X^i = 1\}$ to predict $E[Y \mid X=1, Z=z]$
+2. Fit $f_0$ on the control subsample $\{(z^i, y^i) : X^i = 0\}$ to predict $E[Y \mid X=0, Z=z]$
+3. For each observation, predict under both models and average the difference:
+
+$$\widehat{\text{ATE}} = \frac{1}{n} \sum_i \left[ f_1(z_1^i, \ldots, z_p^i) - f_0(z_1^i, \ldots, z_p^i) \right]$$
+
+Because $X$ is no longer a feature in either model, the issue of it being dropped cannot arise. Each model sees only one treatment arm and must explain $Y$ through the confounders alone.
+
+| | S-Learner | T-Learner |
+|---|---|---|
+| **Models trained** | 1 | 2 |
+| **X as a feature** | Yes (risky) | No |
+| **X-dropping risk** | Yes — can give ATE = 0 | No |
+| **Sample per model** | Full dataset | Half (treated or control only) |
+
+---
+
+### Cross-Fitting
+
+Both S- and T-learners have a subtle overfitting problem: they make predictions on the **same data they were trained on**. Even a perfectly cross-validated model can overfit the ATE estimate when predicting on its own training data — standard CV doesn't catch this because it measures prediction accuracy, not ATE bias.
+
+**Cross-fitting** solves this: split data into D₁ and D₂ (stratified by treatment), train on D₁ and predict on D₂, swap, and average the two ATE estimates. Each observation's contribution is computed by a model that never saw it during training.
+
+Cross-fitting is the foundation of **Double Machine Learning (DML)** — covered in Chapter 8. Full treatment with code: **Chapter 13**.
+
+---
+
+### Code Example: S-Learner vs. T-Learner vs. Cross-Fitting
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
+
+np.random.seed(42)
+n = 3000
+
+# DGP: treatment X has a true ATE of 2.0
+# Confounders Z1, Z2 — both affect X and Y
+z1 = np.random.normal(0, 1, n)
+z2 = np.random.normal(0, 1, n)
+x = np.random.binomial(1, 1 / (1 + np.exp(-z1 - z2)))  # confounded assignment
+y = 2.0 * x + 1.5 * z1 - z2 + np.random.normal(0, 1, n)  # true ATE = 2.0
+
+df = pd.DataFrame({"x": x, "y": y, "z1": z1, "z2": z2})
+Z = df[["z1", "z2"]].values
+XZ = df[["x", "z1", "z2"]].values
+
+# --- Naive estimate ---
+naive = df[df.x == 1]["y"].mean() - df[df.x == 0]["y"].mean()
+print(f"Naive ATE:       {naive:.3f}  (biased)")
+
+# --- S-Learner ---
+s_model = GradientBoostingRegressor(n_estimators=100).fit(XZ, df["y"])
+xz1 = df[["x", "z1", "z2"]].copy(); xz1["x"] = 1
+xz0 = df[["x", "z1", "z2"]].copy(); xz0["x"] = 0
+s_ate = (s_model.predict(xz1) - s_model.predict(xz0)).mean()
+print(f"S-Learner ATE:   {s_ate:.3f}")
+
+# --- T-Learner ---
+f1 = GradientBoostingRegressor(n_estimators=100).fit(Z[x == 1], df["y"][x == 1])
+f0 = GradientBoostingRegressor(n_estimators=100).fit(Z[x == 0], df["y"][x == 0])
+t_ate = (f1.predict(Z) - f0.predict(Z)).mean()
+print(f"T-Learner ATE:   {t_ate:.3f}")
+
+# --- T-Learner with Cross-Fitting ---
+from sklearn.model_selection import train_test_split
+
+D1, D2 = train_test_split(df, test_size=0.5, stratify=df["x"], random_state=0)
+
+def t_learner_ate(train_df, pred_df):
+    f1 = GradientBoostingRegressor(n_estimators=100).fit(
+        train_df[train_df.x == 1][["z1", "z2"]], train_df[train_df.x == 1]["y"]
+    )
+    f0 = GradientBoostingRegressor(n_estimators=100).fit(
+        train_df[train_df.x == 0][["z1", "z2"]], train_df[train_df.x == 0]["y"]
+    )
+    return (f1.predict(pred_df[["z1", "z2"]]) - f0.predict(pred_df[["z1", "z2"]])).mean()
+
+ate_fold1 = t_learner_ate(D1, D2)
+ate_fold2 = t_learner_ate(D2, D1)
+cf_ate = (ate_fold1 + ate_fold2) / 2
+print(f"Cross-fit ATE:   {cf_ate:.3f}")
+print(f"True ATE:        2.000")
+```
+
+---
+
+## Multi-Armed Bandits and Reinforcement Learning
+
+### The Peeking Problem in A/B Tests
+
+A standard A/B test runs for a fixed duration determined upfront by a power calculation. A tempting shortcut: check results mid-experiment and stop early if one arm looks better. This is called **peeking**, and it introduces bias.
+
+Why? Over the course of a four-week experiment, random fluctuations will cause arm A to look better than B at some points and worse at others — even if the true effects are identical. If you stop the moment A pulls ahead, you are conditioning on a random upswing and mistaking noise for signal. The resulting estimate is biased upward in favor of A, and your false positive rate balloons well above the nominal 5%.
+
+**The core rule**: the decision to stop must be made independently of the data, or you must use a sequential testing procedure (e.g., always-valid inference, group sequential tests) that explicitly accounts for multiple looks.
+
+---
+
+### Multi-Armed Bandits
+
+Instead of stopping early, a **multi-armed bandit** takes a different approach: rather than keeping allocation fixed at 50/50 until the end, it dynamically adjusts the proportion of traffic sent to each arm as evidence accumulates — routing more traffic toward the better-performing arm while still exploring the worse arm.
+
+This is a form of **reinforcement learning**: the algorithm learns which arm is better over time and exploits that knowledge, while continuing to explore to avoid locking in prematurely.
+
+**The metric bandits optimize is regret** — the cumulative opportunity cost of not always choosing the best arm:
+
+$$\text{Regret}(T) = \sum_{t=1}^{T} \left[ \mu^* - \mu_{a_t} \right]$$
+
+where $\mu^*$ is the expected reward of the best arm and $\mu_{a_t}$ is the expected reward of the arm chosen at time $t$. A good bandit algorithm keeps regret sublinear in $T$ — it converges toward always choosing the best arm.
+
+### Bandits vs. A/B Tests
+
+| | A/B Test | Multi-Armed Bandit |
+|---|---|---|
+| **Allocation** | Fixed (e.g., 50/50) throughout | Dynamic — shifts toward better arm |
+| **Goal** | Estimate causal effect precisely | Minimize regret (maximize reward) |
+| **Sample efficiency** | Less — some traffic always goes to worse arm | More — exploits evidence faster |
+| **Causal estimate** | Unbiased (randomization preserved) | Potentially biased (arm assignment becomes correlated with time and outcomes) |
+| **When to use** | Need a clean causal estimate | Optimizing reward in production; can tolerate some estimation bias |
+
+**The key tradeoff**: bandits are more sample-efficient and reduce the cost of running the inferior arm, but the dynamic allocation means arm assignment is no longer independent of potential outcomes — violating the randomization assumption that makes A/B test estimates unbiased. If you need a clean causal estimate (e.g., for a business case or policy decision), use a fixed A/B test. If you primarily care about maximizing the metric during the experiment itself, a bandit may be appropriate.
+
+### Causal Inference + Bandits
+
+In some settings, historical bandit data is used to evaluate a new policy — a problem called **off-policy evaluation**. Because the bandit algorithm assigned arms non-randomly (it favored better arms over time), naive estimates of arm performance are confounded: the better arm was shown to users at times when outcomes may have been independently higher.
+
+Causal inference tools — specifically inverse probability weighting (IPW, Chapter 5) — are used to correct for this: re-weight observations by the inverse of the probability that the bandit assigned the observed arm at that time step. This recovers an unbiased estimate of what a different policy would have achieved.
+
+### Code Example: Epsilon-Greedy Bandit vs. Fixed A/B Test
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+T = 2000          # total time steps
+true_p = [0.10, 0.15]   # true conversion rates: arm 0 is worse, arm 1 is better
+
+# --- Fixed A/B Test (50/50 allocation) ---
+ab_rewards = []
+ab_assignments = np.random.binomial(1, 0.5, T)   # fixed random assignment
+for t in range(T):
+    arm = ab_assignments[t]
+    reward = np.random.binomial(1, true_p[arm])
+    ab_rewards.append(reward)
+
+ab_total = sum(ab_rewards)
+
+# --- Epsilon-Greedy Bandit ---
+epsilon = 0.1    # explore with probability epsilon, exploit otherwise
+counts  = [0, 0]
+values  = [0.0, 0.0]   # running mean reward per arm
+bandit_rewards = []
+bandit_arms    = []
+
+for t in range(T):
+    if np.random.rand() < epsilon or sum(counts) < 2:
+        arm = np.random.randint(2)       # explore
+    else:
+        arm = int(np.argmax(values))     # exploit
+
+    reward = np.random.binomial(1, true_p[arm])
+    counts[arm] += 1
+    values[arm] += (reward - values[arm]) / counts[arm]   # incremental mean update
+    bandit_rewards.append(reward)
+    bandit_arms.append(arm)
+
+bandit_total = sum(bandit_rewards)
+pct_arm1 = bandit_arms.count(1) / T
+
+print(f"A/B Test  — total reward: {ab_total}  |  arm 1 share: 50.0%")
+print(f"Bandit    — total reward: {bandit_total}  |  arm 1 share: {pct_arm1:.1%}")
+print(f"Bandit regret reduction vs A/B: {bandit_total - ab_total} additional conversions")
+
+# Peeking bias demonstration
+cumulative_ab = np.cumsum(
+    [np.random.binomial(1, true_p[a]) - np.random.binomial(1, true_p[1-a])
+     for a in ab_assignments]
+)
+# Random fluctuations cause A to look better or worse at various interim points
+# Stopping at the first "significant" crossing introduces bias
+```
+
+---
+
 ## Interview Questions
 
 ### Technical Questions
@@ -521,6 +745,23 @@ Simulation (from an SCM) is useful for:
 
 ---
 
+**Q5: What is the difference between the S-learner and T-learner?**
+
+Both are meta-learners — they use ML models to evaluate the adjustment formula when there are many confounders.
+
+- **S-learner**: trains a single model $f(X, Z_1, \ldots, Z_p)$. ATE = average of $f(1, z^i) - f(0, z^i)$ across all rows. Risk: tree-based models may ignore $X$ entirely if $Z$ explains $Y$ well, returning ATE = 0 spuriously.
+- **T-learner**: trains two models, $f_1$ on treated units and $f_0$ on control units. ATE = average of $f_1(z^i) - f_0(z^i)$. Since $X$ is not a feature in either model, the X-dropping failure mode is impossible.
+
+---
+
+**Q6: What is cross-fitting and why is it needed for meta-learners?**
+
+S- and T-learners make predictions on the same data they were trained on. This causes in-sample overfitting of the ATE — distinct from prediction overfitting, and not caught by standard cross-validation.
+
+Cross-fitting fixes this: split data into $D_1$ and $D_2$, train on $D_1$ and predict on $D_2$ to get $\text{ATE}_2$, then swap to get $\text{ATE}_1$, and average. Each observation's ATE contribution is computed by a model that never saw that observation during training. Cross-fitting is the foundation of Double Machine Learning (Chapter 8).
+
+---
+
 ### Case Study Questions
 
 **Case 1: Your company is deciding whether to build a personalized pricing model or do a pricing experiment. How do you advise?**
@@ -549,3 +790,27 @@ Policy simulation extrapolates the estimated treatment effect to a new intervent
 4. **Distribution shift**: The policy changes which units are treated, potentially selecting a population different from the training data.
 
 Always pair a simulation with a subsequent experiment to validate the predicted effect.
+
+---
+
+**Case 4: A colleague says "I used cross-validation to select which confounders to include in my causal model — I kept only the ones that improved prediction accuracy." What's the problem?**
+
+This is a fundamental error. Cross-validation optimizes for predictive accuracy on held-out data — it has no ability to detect confounding bias. Dropping a true confounder from the model can introduce Simpson's paradox-style reversal in the causal estimate, yet the cross-validated prediction error may improve (the dropped variable was collinear and added noise to prediction).
+
+In causal inference, variables are included because they are confounders — causes of both treatment and outcome — as determined by the DAG. That decision must be made before any data is touched. Cross-validation cannot substitute for causal reasoning about the data-generating process.
+
+---
+
+**Case 5: Your S-learner returns an ATE of exactly 0, but you believe the treatment has a real effect. What's likely happening and how do you fix it?**
+
+The S-learner's failure mode: a tree-based model trained on $(X, Z_1, \ldots, Z_p)$ may route all its prediction through $Z$ and never split on $X$ — especially when $Z$ is highly predictive of $Y$ and $X$ is correlated with $Z$. The model becomes insensitive to $X$, so evaluating $f(1, z^i) - f(0, z^i)$ returns 0 for every observation.
+
+Fix: switch to a **T-learner** — train separate models $f_1$ and $f_0$ on the treated and control subsamples respectively. Since $X$ is no longer a feature in either model, the issue cannot arise. Add **cross-fitting** to avoid in-sample overfitting of the ATE estimate.
+
+---
+
+**Case 6: Your PM wants to stop an A/B test after one week because the treatment looks significantly better. What do you say?**
+
+This is the **peeking problem** — stopping early when one arm appears better introduces bias. Over the course of the experiment, random fluctuations will cause the treatment to look better at some interim points even if the true effect is zero. Stopping the moment it crosses a significance threshold conditions on a random upswing and inflates the false positive rate well above 5%.
+
+Options: (1) commit to the pre-specified sample size and don't look until the end; (2) use a **sequential testing procedure** (group sequential test or always-valid p-values) that explicitly corrects for multiple looks; or (3) switch to a **multi-armed bandit** if the goal is to minimize regret during the experiment rather than obtain an unbiased causal estimate. If a clean causal estimate is needed for a business decision, hold the line on the fixed test duration.

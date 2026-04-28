@@ -49,6 +49,59 @@ Even though A and B might differ on individual covariates, they had essentially 
 
 ---
 
+### Positivity via the Propensity Score
+
+The propensity score makes the **positivity assumption** concrete and intuitive.
+
+Recall that positivity requires $0 < P(T=1 \mid X) < 1$ for all $X$ in the data — i.e., $0 < e(X) < 1$. The propensity score boundary values tell you exactly when this fails:
+
+- **$e(X) = 1$**: every unit with this covariate profile received treatment. There are no control matches for this type of unit — you have zero information about what the untreated outcome would look like for them. Any estimate here is pure extrapolation.
+- **$e(X) = 0$**: every unit with this covariate profile received control. No treated units exist for this profile — the treated counterfactual is unobserved and inestimable from data.
+- **$0 < e(X) < 1$**: both treated and untreated units exist within this covariate profile. A real comparison is possible — for every unit, there is a counterpart who received the opposite treatment, supporting the construction of a valid counterfactual.
+
+**The practical implication**: two groups are only *comparable* where their propensity score distributions overlap — the **common support** region. Units outside this overlap (PS near 0 or 1) have no valid match in the other group. In PSM, these units are dropped via the caliper. In IPW, they generate extreme weights ($1/e(X) \to \infty$ as $e(X) \to 0$) that destabilize the estimate.
+
+This is why the first diagnostic after estimating propensity scores is always a **PS overlap plot** — histograms of the score distribution for treated and control units side by side. If the distributions don't overlap, you don't have a valid comparison, regardless of how sophisticated your estimator is.
+
+```python
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LogisticRegression
+
+np.random.seed(0)
+n = 1000
+
+age = np.random.normal(40, 10, n)
+engagement = np.random.normal(0, 1, n)
+treatment = np.random.binomial(1, 1 / (1 + np.exp(-0.5 * engagement + 0.03 * (age - 40))))
+
+df = pd.DataFrame({"age": age, "engagement": engagement, "treatment": treatment})
+
+ps_model = LogisticRegression().fit(df[["age", "engagement"]], df["treatment"])
+df["ps"] = ps_model.predict_proba(df[["age", "engagement"]])[:, 1]
+
+# Overlap plot — the key positivity diagnostic
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.hist(df[df.treatment == 1]["ps"], bins=30, alpha=0.6, label="Treated", color="steelblue")
+ax.hist(df[df.treatment == 0]["ps"], bins=30, alpha=0.6, label="Control",  color="coral")
+ax.axvline(0.05, color="gray", linestyle="--", linewidth=1, label="PS = 0.05 / 0.95")
+ax.axvline(0.95, color="gray", linestyle="--", linewidth=1)
+ax.set_xlabel("Propensity Score")
+ax.set_ylabel("Count")
+ax.set_title("Propensity Score Overlap Plot (Positivity Diagnostic)")
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# Units outside common support
+poor_overlap = df[(df.ps < 0.05) | (df.ps > 0.95)]
+print(f"Units with PS outside (0.05, 0.95): {len(poor_overlap)} ({len(poor_overlap)/n:.1%})")
+print("These units have no valid match — positivity likely fails here.")
+```
+
+---
+
 ## Estimating the Propensity Score
 
 ### Logistic Regression (Standard Approach)
@@ -60,6 +113,16 @@ $$\log\frac{e(X)}{1 - e(X)} = \beta_0 + \beta_1 X_1 + \beta_2 X_2 + \cdots + \be
 The fitted probabilities $\hat{e}(X_i) = \hat{P}(T_i = 1 \mid X_i)$ are the estimated propensity scores.
 
 **Important distinction from predictive modeling**: the goal here is **not** to maximize predictive accuracy. The goal is to build a model that captures all the confounding relationships. A model that perfectly separates treated and control units will produce extreme propensity scores (near 0 or 1) for many units, blowing up the IPW weights. What you want is a model that explains selection without overfitting.
+
+**Why cross-validation doesn't fully protect you here**: in standard ML, you train on one dataset and deploy on new unseen data — cross-validation guards against that generalization failure. But propensity scores are different: you train on your historical dataset and score *those same units*. There is no new data. The risk isn't generalization failure — it's that a complex model overfits the treatment assignment in your specific dataset, producing extreme scores and destroying overlap. Cross-validation catches generalization overfitting; it does not catch this in-sample overfitting of the PS. The true protection is: regularize your PS model, check the score distribution for extremes, and verify balance.
+
+**The counterintuitive AUC rule**: a very high AUC (>0.9) is a red flag, not a success. High AUC means the model can almost perfectly distinguish treated from control — which means the two groups are fundamentally different kinds of units with little overlap. This is the positivity problem expressed through the propensity score model. The sweet spot is roughly **AUC 0.6–0.8**: enough separation to capture real confounding, but not so much that overlap collapses.
+
+| AUC | Interpretation | Action |
+|---|---|---|
+| ~0.5 | Model can't separate groups — scores uninformative | Add more/better covariates |
+| 0.6–0.8 | Healthy separation — good overlap likely | Proceed, check SMD |
+| >0.9 | Groups are near-perfectly distinct — positivity likely violated | Check overlap plot; common support may be too narrow for a valid comparison |
 
 ### Machine Learning Alternatives
 
@@ -256,6 +319,8 @@ print(f"True ATT:          $50.0")
 
 Instead of discarding unmatched units, IPW **reweights** every unit so that the weighted sample mimics a randomized experiment.
 
+**Critical distinction from PSM: IPW does not match anyone to anyone.** Every unit stays in the dataset — treated and control are never paired. Instead, each unit gets a weight, and you compute weighted averages within each group separately, then subtract.
+
 ### The Intuition
 
 In the weighted sample, controls with high propensity scores get upweighted (they're rare in the control group given their profile, so they represent many similar units that *could* have been treated). Controls with low propensity scores get downweighted. The result: the weighted distribution of covariates among controls looks like the distribution among treated units.
@@ -266,7 +331,30 @@ For ATE estimation, the standard IPW weights are:
 
 $$w_i = \frac{T_i}{e(X_i)} + \frac{1 - T_i}{1 - e(X_i)}$$
 
-Each treated unit is weighted by $1/e(X_i)$ (inverse of the probability of receiving the treatment they got). Each control unit is weighted by $1/(1-e(X_i))$. This makes the weighted treated group represent the full population, and likewise for the weighted control group.
+Each treated unit is weighted by $1/e(X_i)$ (inverse of the probability of receiving the treatment they got). Each control unit is weighted by $1/(1-e(X_i))$.
+
+### Step-by-Step Numeric Example
+
+| Person | Group | PS $e(X)$ | Weight | Outcome $Y$ |
+|---|---|---|---|---|
+| A | Treated | 0.6 | 1/0.6 = 1.67 | 80 |
+| B | Treated | 0.9 | 1/0.9 = 1.11 | 70 |
+| C | Control | 0.6 | 1/0.4 = 2.50 | 60 |
+| D | Control | 0.1 | 1/0.9 = 1.11 | 50 |
+
+**Why C gets weight 2.50:** PS = 0.6 means someone like C usually gets treated. But C ended up in control — unusual. So C is upweighted to represent many "treated-type" people who happened to be controls.
+
+**Step 1: Weighted mean for each group**
+
+$$\widehat{E[Y(1)]} = \frac{1.67 \times 80 + 1.11 \times 70}{1.67 + 1.11} = \frac{133.6 + 77.7}{2.78} = 76.4$$
+
+$$\widehat{E[Y(0)]} = \frac{2.50 \times 60 + 1.11 \times 50}{2.50 + 1.11} = \frac{150 + 55.5}{3.61} = 56.9$$
+
+**Step 2: ATE = difference**
+
+$$\widehat{\text{ATE}} = 76.4 - 56.9 = 19.5$$
+
+No pairs, no matching — just weighted averages within each group, then subtract.
 
 ### IPW ATE Estimator
 
@@ -818,9 +906,13 @@ Diagnosis: plot PS distributions for treated and control. If they don't overlap,
 
 **Q5: How do you assess whether a propensity score model is "good"?**
 
-Not by predictive accuracy (AUC). The propensity score model is good if, after matching or weighting on it, **covariate balance improves**. The diagnostic is the SMD for each covariate before and after adjustment. Target: $|\text{SMD}| < 0.1$ for all covariates after adjustment.
+Not by predictive accuracy (AUC) alone — and critically, **higher AUC is not always better**.
 
-A model with high AUC but poor balance is failing at its job. Conversely, a model with mediocre AUC that achieves excellent balance is doing exactly what's needed. You may need to add interactions or polynomial terms to the PS model to achieve balance on non-linear covariate relationships.
+- **Too low AUC (~0.5)**: the model can't separate treated from control — scores are uninformative, confounding isn't being captured
+- **Sweet spot (0.6–0.8)**: healthy separation, good overlap likely, proceed to balance checking
+- **Too high AUC (>0.9)**: the model almost perfectly separates the groups — meaning treated and control are fundamentally different populations with little overlap. This is a positivity violation signal. Any estimate will rely heavily on extrapolation.
+
+The real diagnostic is **covariate balance after adjustment**: check SMD for every covariate before and after matching/weighting. Target $|\text{SMD}| < 0.1$. A model with mediocre AUC that achieves excellent balance is doing its job. A model with high AUC but poor balance — or extreme PS distributions — is failing.
 
 ---
 
